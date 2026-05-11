@@ -51,7 +51,7 @@ class ExecutorDecision(BaseModel):
     action: str | None = None
     action_input: dict[str, Any] = Field(default_factory=dict)
     task_complete: bool = False
-    result: str = ""
+    result: str | None = None
 
 
 class ReflectionResult(BaseModel):
