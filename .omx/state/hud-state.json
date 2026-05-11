@@ -1,0 +1,5 @@
+{
+  "last_turn_at": "2026-05-10T12:49:17.144Z",
+  "turn_count": 2,
+  "last_agent_output": "可以，但**不能只换 key**。DeepSeek 官方文档说明它兼容 OpenAI SDK，但需要同时配置：\n\n- `api_key`: DeepSeek 的 key\n- `base_url`: `"
+}
