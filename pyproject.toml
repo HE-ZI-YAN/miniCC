@@ -1,7 +1,7 @@
 [project]
 name = "mini-claude-code"
-version = "0.1.0"
-description = "Mini Claude Code v1: a tiny ReAct coding agent built with LangGraph, OpenAI, Typer, Rich, and Pydantic."
+version = "0.2.0"
+description = "Mini Claude Code v2: a planning, execution, reflection coding agent built with LangGraph, OpenAI-compatible APIs, Typer, Rich, and Pydantic."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
