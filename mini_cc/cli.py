@@ -29,6 +29,8 @@ def main(
         help="OpenAI-compatible API base URL. Defaults to DeepSeek when DEEPSEEK_API_KEY is set.",
     ),
     max_iterations: int = typer.Option(30, "--max-iterations", help="Maximum DAG node iterations."),
+    runtime: str = typer.Option("v3", "--runtime", help="Agent runtime: v2 or v3."),
+    parallelism: int = typer.Option(3, "--parallelism", help="Parallel agents for v3 runtime."),
 ) -> None:
     """Run the coding agent."""
     workspace_path = os.path.abspath(workspace)
@@ -36,15 +38,33 @@ def main(
     load_env_file(workspace_path)
     resolved_api_key, resolved_base_url, resolved_model = resolve_llm_config(model, base_url)
 
-    from mini_cc.agent import MiniClaudeCodeAgent
-
     console.print(Panel.fit(f"[bold]Task[/bold]\n{task}", border_style="cyan"))
-    agent = MiniClaudeCodeAgent(
+    if runtime.lower() == "v2":
+        from mini_cc.agent import MiniClaudeCodeAgent
+
+        agent = MiniClaudeCodeAgent(
+            workspace=workspace_path,
+            model=resolved_model,
+            api_key=resolved_api_key,
+            base_url=resolved_base_url,
+            max_iterations=max_iterations,
+            event_sink=render_event,
+        )
+        agent.run(task)
+        return
+
+    if runtime.lower() != "v3":
+        raise typer.BadParameter("--runtime must be v2 or v3")
+
+    from mini_cc.production import ProductionAgentRuntime
+
+    agent = ProductionAgentRuntime(
         workspace=workspace_path,
         model=resolved_model,
         api_key=resolved_api_key,
         base_url=resolved_base_url,
         max_iterations=max_iterations,
+        parallelism=parallelism,
         event_sink=render_event,
     )
     agent.run(task)
@@ -93,6 +113,16 @@ def render_event(event: dict[str, Any]) -> None:
     elif event_type == "final":
         console.print()
         console.print(Panel(event["content"], title="Final Answer", border_style="cyan"))
+    elif event_type == "v3_event":
+        event_payload = event["event"]
+        name = event_payload["type"]
+        source = event_payload["source"]
+        payload = event_payload.get("payload", {})
+        if name == "stream.token":
+            console.print(payload.get("token", ""), end="", soft_wrap=True)
+        elif name in {"agent.started", "agent.routed", "agent.finished", "tool.started", "tool.finished", "tool.failed"}:
+            console.print()
+            console.print(Panel(str(payload), title=f"{name} :: {source}", border_style="cyan"))
 
 
 def resolve_llm_config(model: str | None, base_url: str | None) -> tuple[str, str | None, str]:
