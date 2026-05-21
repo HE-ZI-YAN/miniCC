@@ -1,393 +1,512 @@
-# Mini Claude Code v2
+# Mini Claude Code v3 - Production Agent
 
-Mini Claude Code v2 是一个教学型 Coding Agent。v1 展示的是最小 ReAct 循环：
+Mini Claude Code v3 是一个“生产级 AI Agent 系统”的最小工程骨架。它保留 v2 的 Planner/Executor/Reflector 思想，并升级为：
 
-```text
-Thought -> Action -> Observation -> Final Answer
+- Multi-Agent System
+- Browser Agent
+- GUI Agent
+- MCP Tool System
+- RAG
+- Long-term Memory
+- Task Queue
+- Parallel Agent
+- Event-driven Architecture
+- Agent Trace
+
+默认运行 v3：
+
+```powershell
+cc "帮我分析当前项目"
 ```
 
-v2 展示现代 Coding Agent 更核心的设计：
+对比运行 v2：
+
+```powershell
+cc "帮我分析当前项目" --runtime v2
+```
+
+## 1. 真实工程目录
+
+```text
+miniCC/
+  pyproject.toml
+  README.md
+  .env.example
+  .gitignore
+  mini_cc/
+    agent.py             # v2 single-agent DAG
+    production.py        # v3 stateful multi-agent DAG
+    production_state.py  # Shared State / Agent message / Agent result
+    events.py            # Event Bus / Agent Event / Tool Event / Streaming Event
+    task_queue.py        # In-memory task queue
+    memory.py            # Long-term memory JSON store
+    rag.py               # Dependency-free codebase RAG baseline
+    mcp.py               # MCP-like tool protocol/client/server
+    browser_agent.py     # Browser Agent adapter
+    gui_agent.py         # GUI Agent adapter
+    observability.py     # Trace + cost tracker
+    tools.py             # Local tools and patch system
+    cli.py               # Typer + Rich CLI
+    prompts.py           # v2 prompts
+    state.py             # v2 state schema
+```
+
+## 2. 系统整体架构
 
 ```text
 User Goal
-  -> Planner
-  -> Executor
-  -> Tool
-  -> Reflector
-  -> Planner / Executor
-  -> Final Answer
+  |
+  v
+Agent Router
+  |
+  +--> Planner Agent
+  +--> Coding Agent  ----+
+  +--> Test Agent    ----+--> Integrator
+  +--> Reviewer Agent ---+
+  +--> Debug Agent
+  +--> Browser Agent
+  +--> GUI Agent
+  |
+  v
+Shared State + Event Bus + Long-term Memory + RAG + MCP Tools
 ```
 
-也就是：先规划，再执行，再反思，再修正计划或重试，直到复杂任务完成。
+核心实现：`mini_cc/production.py`。
 
-## 1. 新架构设计
+v3 的 DAG：
 
 ```text
-                 ┌─────────────────────┐
-                 │      User Goal       │
-                 └──────────┬──────────┘
-                            v
-                 ┌─────────────────────┐
-                 │   Planner Agent      │
-                 │ - 拆解任务            │
-                 │ - 维护 TODO           │
-                 │ - 动态调整计划         │
-                 └──────────┬──────────┘
-                            v
-                 ┌─────────────────────┐
-                 │   Executor Agent     │
-                 │ - 选择一个工具         │
-                 │ - 执行当前 TODO        │
-                 └──────────┬──────────┘
-                            v
-                 ┌─────────────────────┐
-                 │      Tool Node       │
-                 │ - 文件/搜索/命令/补丁   │
-                 └──────────┬──────────┘
-                            v
-                 ┌─────────────────────┐
-                 │  Reflection Agent    │
-                 │ - 判断成败            │
-                 │ - 诊断错误            │
-                 │ - 决定 retry/plan     │
-                 └──────┬────────┬─────┘
-                        │        │
-                        v        v
-                    Executor   Planner
+router -> parallel_agents -> integrator -> router
+router -> END
+integrator -> END
 ```
 
-核心文件：
+## 3. Multi-Agent 通信机制
 
-```text
-mini_cc/
-  agent.py       # LangGraph Stateful DAG
-  state.py       # Task/Memory/Reflection schema
-  prompts.py     # Planner/Executor/Reflector prompts
-  tools.py       # Tools + patch system
-  cli.py         # Typer + Rich streaming UI
-```
-
-## 2. LangGraph DAG
-
-`mini_cc/agent.py` 中的 DAG：
+通信对象在 `production_state.py`：
 
 ```python
-planner -> executor
-executor -> tool | reflector
-tool -> reflector
-reflector -> executor | planner | END
+class AgentMessage(BaseModel):
+    sender: AgentRole
+    recipient: AgentRole | Literal["router", "all"]
+    content: str
+    metadata: dict[str, Any]
+
+class AgentAssignment(BaseModel):
+    role: AgentRole
+    task: str
+    context: str
+    parallel: bool
+
+class AgentResult(BaseModel):
+    role: AgentRole
+    summary: str
+    success: bool
+    evidence: list[str]
+    next_actions: list[AgentAssignment]
+    tool_calls: list[dict[str, Any]]
 ```
 
-节点职责：
+生产系统里 Agent 间通常不直接互相调用，而是通过：
 
-- `planner`：理解用户目标，生成或调整 TODO List。
-- `executor`：针对当前 TODO 选择一个工具调用，或声明当前 TODO 已完成。
-- `tool`：执行真实外部动作，例如读文件、搜代码、跑测试、应用 patch。
-- `reflector`：判断结果是否正确、是否完成、是否要重试或回到 planner。
+- Router 分派任务
+- Shared State 共享上下文
+- Event Bus 广播过程
+- Queue 承载异步任务
+- Integrator 汇总结果
 
-条件边：
+## 4. Shared State
 
-```text
-planner:
-  status == done  -> END
-  otherwise       -> executor
-
-executor:
-  pending_action  -> tool
-  no action       -> reflector
-
-reflector:
-  retry == true   -> executor
-  all done        -> END
-  otherwise       -> planner
-```
-
-## 3. State Schema
-
-`mini_cc/state.py` 是 v2 的关键。现代 Agent 的能力来自“状态”，不是只来自 prompt。
+`SharedState` 是生产 Agent 的核心：
 
 ```python
-TaskStatus = Literal["TODO", "RUNNING", "BLOCKED", "DONE"]
-
-class TaskItem(BaseModel):
-    id: int
-    title: str
-    status: TaskStatus
-    notes: str
-    attempts: int
-
-class MemoryState(BaseModel):
-    conversation: list[dict[str, str]]
-    task_memory: list[str]
-    tool_history: list[dict[str, Any]]
-    scratchpad: str
-
-class AgentState(TypedDict):
+class SharedState(BaseModel):
+    run_id: str
     user_goal: str
     workspace: str
     todos: list[TaskItem]
-    current_task_id: int | None
+    messages: list[AgentMessage]
     memory: MemoryState
-    steps: list[AgentStep]
-    pending_action: dict[str, Any] | None
-    last_observation: str | None
-    last_executor_result: str | None
-    last_reflection: ReflectionResult | None
+    repository_context: list[str]
+    assignments: list[AgentAssignment]
+    results: list[AgentResult]
+    artifacts: dict[str, Any]
     final_answer: str | None
     iteration: int
     max_iterations: int
-    status: GraphStatus
+    status: Literal["running", "done", "error"]
 ```
 
-这让 Agent 能回答几个关键问题：
+关键思想：生产级 Agent 不是一条 prompt，而是一个显式状态机。
 
-- 当前目标是什么？
-- 当前做到哪一个 TODO？
-- 哪些工具调用过，结果是什么？
-- 上一次失败原因是什么？
-- 应该重试、换工具，还是重新规划？
+## 5. Agent Router
 
-## 4. Reflection Loop
+Router 的职责：
 
-Reflection 不是“总结一下”，而是控制流判断器。
+- 根据用户目标、历史结果、长期记忆、MCP 工具列表选择下一批 Agent
+- 决定哪些 Agent 并行运行
+- 判断是否完成
 
-Reflector 输出：
+当前默认路由：
+
+```text
+first round:
+  Planner + Coding + Test
+
+later rounds:
+  Coding + Test + Reviewer
+```
+
+如果 LLM Router 输出合法 JSON，则按模型决策路由；否则使用 fallback route。
+
+## 6. MCP 协议设计
+
+`mini_cc/mcp.py` 实现了一个进程内 MCP-like 协议：
+
+```text
+tools/list
+tools/call
+```
+
+请求：
 
 ```json
 {
-  "task_status": "RUNNING",
-  "success": false,
-  "error_type": "test_failure",
-  "diagnosis": "pytest failed because module import is wrong",
-  "recovery_plan": "read the failing file and patch the import",
-  "retry": true,
-  "update_plan": false
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "tools/call",
+  "params": {
+    "name": "GitDiffTool",
+    "arguments": {"path": "."}
+  }
 }
 ```
 
-如果 `retry=true`：
-
-```text
-Reflector -> Executor
-```
-
-如果 `update_plan=true`：
-
-```text
-Reflector -> Planner
-```
-
-如果所有 TODO 都是 `DONE`：
-
-```text
-Reflector -> END
-```
-
-这就是自动恢复的基础：错误不直接返回给用户，而是变成下一轮执行的上下文。
-
-## 5. Planning 系统
-
-Planner Prompt 在 `mini_cc/prompts.py`。
-
-Planner 负责：
-
-- 理解用户目标
-- 拆解 TODO
-- 选择当前任务
-- 根据反思结果调整计划
-- 判断整体是否完成
-
-Planner 输出严格 JSON：
+响应：
 
 ```json
 {
-  "thought": "Need to inspect the project before editing.",
-  "todos": [
-    {"id": 1, "title": "Inspect project structure", "status": "RUNNING", "notes": "", "attempts": 0},
-    {"id": 2, "title": "Find duplicated code", "status": "TODO", "notes": "", "attempts": 0},
-    {"id": 3, "title": "Apply small refactor patches", "status": "TODO", "notes": "", "attempts": 0},
-    {"id": 4, "title": "Run tests and inspect diff", "status": "TODO", "notes": "", "attempts": 0}
-  ],
-  "current_task_id": 1,
-  "scratchpad": "Refactor task; inspect first.",
-  "done": false,
-  "final_answer": null
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": "diff output",
+  "error": null
 }
 ```
 
-## 6. Memory 设计
+生产环境可替换为真正的 MCP server process：
 
-v2 实现了 5 类记忆：
+```text
+Agent Runtime -> MCP Client -> MCP Server -> Tool Provider
+```
 
-- `Conversation Memory`：用户目标和对话上下文。
-- `Task Memory`：每轮 reflection 产生的诊断记录。
-- `Tool History`：工具名、参数、Observation。
-- `Scratchpad`：Planner/Reflector 共享的短期工作区。
-- `当前任务状态`：TODO/RUNNING/BLOCKED/DONE。
+## 7. Browser Agent
 
-关键思想：不要指望模型“记得”。需要完成复杂任务，就要把关键状态显式持久化。
+`browser_agent.py` 提供默认无依赖只读网页读取器：
 
-## 7. Patch 系统
+- `fetch(url)`
+- `search_url(query)`
 
-v1 有 `WriteFileTool`，可以整文件覆盖。v2 新增 `ApplyPatchTool`，支持 unified diff：
+生产替换建议：
+
+- Playwright：强网页自动化、登录态、点击、表单
+- Browser Use：自然语言浏览器操作
+- Crawl4AI：文档抓取、站点爬取、Markdown 提取
+
+生产 Browser Agent 架构：
+
+```text
+Browser Agent
+  -> Search Provider
+  -> Crawler
+  -> HTML/Markdown Extractor
+  -> RAG Index
+  -> Citation Store
+```
+
+## 8. GUI Agent
+
+`gui_agent.py` 是 pyautogui 可选适配层：
+
+- `screenshot(path)`
+- `click(x, y)`
+- `type_text(text)`
+
+生产 GUI Agent 需要三层：
+
+```text
+Screenshot
+  -> Vision Model / Omni Parser
+  -> UI Element Grounding
+  -> pyautogui Action
+  -> Observation Screenshot
+```
+
+关键不是“能点击”，而是每次点击后要观察屏幕并验证状态变化。
+
+## 9. RAG 系统
+
+`rag.py` 实现了一个无依赖 lexical RAG baseline：
+
+- `index()` 扫描仓库
+- `retrieve(query, k)` 返回相关文件片段
+
+生产替换：
+
+- FAISS：本地向量索引
+- Chroma：轻量持久化向量库
+- Qdrant：服务化向量数据库
+
+生产级 RAG 结构：
+
+```text
+Code Chunker
+  -> Embedding Model
+  -> Vector DB
+  -> Hybrid Retrieval
+  -> Context Compressor
+  -> Prompt Builder
+```
+
+## 10. Long-term Memory
+
+`memory.py` 使用 `.mini_cc_memory.json` 保存：
+
+- 用户偏好
+- 历史任务
+- 经验缓存
+- 项目记忆
+
+生产建议：
+
+```text
+Short-term Memory: current run state
+Working Memory: scratchpad / active plan
+Long-term Memory: project/user/task history
+Semantic Memory: vectorized lessons and code facts
+Episodic Memory: traces from previous runs
+```
+
+## 11. 并行执行架构
+
+`production.py` 使用 `ThreadPoolExecutor`：
+
+```text
+parallel_agents node:
+  Coding Agent
+  Test Agent
+  Reviewer Agent
+  Browser Agent
+  Debug Agent
+```
+
+生产环境建议拆成队列：
+
+```text
+Router -> Redis / RabbitMQ / NATS -> Worker Pool -> Result Store -> Integrator
+```
+
+并发不是为了热闹，而是为了让这些工作同时发生：
+
+- 一个 Agent 分析代码
+- 一个 Agent 跑测试
+- 一个 Agent 查文档
+- 一个 Agent review diff
+
+## 12. Event System
+
+`events.py` 定义：
+
+- `AgentEvent`
+- `EventBus`
+- `agent.started`
+- `agent.finished`
+- `agent.routed`
+- `tool.started`
+- `tool.finished`
+- `stream.token`
+- `rag.indexed`
+- `rag.retrieved`
+- `mcp.tool_discovered`
+
+事件流：
+
+```text
+Agent Runtime -> EventBus -> CLI Renderer
+                         -> Trace Writer
+                         -> Future Metrics Exporter
+```
+
+## 13. Streaming 架构
+
+v3 中 streaming 不只来自 LLM token：
+
+```text
+LLM Token Event
+Tool Event
+Agent Event
+Queue Event
+RAG Event
+Trace Event
+```
+
+CLI 统一消费 `v3_event`，按事件类型渲染。
+
+## 14. 微服务拆分建议
+
+生产环境建议拆分：
+
+```text
+api-gateway
+agent-orchestrator
+agent-worker-coding
+agent-worker-browser
+agent-worker-gui
+mcp-tool-server
+rag-indexer
+memory-service
+trace-service
+web-ui
+```
+
+边界：
+
+- Orchestrator 管 DAG 和 Shared State
+- Workers 只执行 assignment
+- MCP Server 管工具权限和审计
+- RAG Indexer 异步维护索引
+- Trace Service 存全链路事件
+
+## 15. Docker 架构
+
+建议：
+
+```yaml
+services:
+  orchestrator:
+    build: .
+    env_file: .env
+    depends_on: [redis, qdrant]
+
+  worker-coding:
+    build: .
+    command: mini-cc-worker coding
+
+  worker-browser:
+    build: .
+    command: mini-cc-worker browser
+
+  redis:
+    image: redis:7
+
+  qdrant:
+    image: qdrant/qdrant
+
+  playwright:
+    image: mcr.microsoft.com/playwright/python
+```
+
+## 16. 消息队列设计
+
+队列主题：
+
+```text
+agent.assignments
+agent.results
+tool.requests
+tool.results
+events.stream
+trace.events
+```
+
+消息要带：
+
+- `run_id`
+- `task_id`
+- `agent_role`
+- `attempt`
+- `idempotency_key`
+- `timeout`
+- `budget`
+
+## 17. 可观测性和日志系统
+
+当前实现：
+
+- `AgentTrace` 写 JSONL 到 `.omx/logs/mini_cc_trace_<run_id>.jsonl`
+- `EventBus` 保留内存事件列表
+- CLI 显示关键事件
+
+生产建议：
+
+- JSON structured logs
+- OpenTelemetry traces
+- Prometheus metrics
+- per-agent latency
+- per-tool failure rate
+- token cost dashboard
+
+## 18. Token 成本控制
+
+`CostTracker` 当前记录 prompt/completion 字符数。
+
+生产级策略：
+
+- Prompt Cache：系统 prompt、工具 schema、repo summary 缓存
+- Context Compression：长历史压缩成摘要
+- RAG First：只取相关片段
+- Model Router：简单任务用小模型，关键 review 用强模型
+- Budget Guard：每个 run / task / agent 有 token 上限
+
+## 19. Agent Trace
+
+Trace 的价值：
+
+- 回放一次 Agent 为什么这么做
+- 复盘失败路径
+- 做自动评测
+- 训练更好的 Router/Prompt
+
+v3 trace 是 JSONL：
 
 ```json
-{
-  "patch": "--- a/file.py\n+++ b/file.py\n@@ ...",
-  "preview": true,
-  "reverse": false
-}
+{"type": "agent.started", "source": "coding", "payload": {...}}
+{"type": "tool.finished", "source": "RunTestTool", "payload": {...}}
 ```
 
-工作流：
+## 20. Claude Code / Devin / Manus / OpenHands 共性架构
 
-1. `preview=true`：只做 `git apply --check`，展示 patch。
-2. `preview=false`：真正应用 patch。
-3. patch 路径会检查，不能逃出 workspace。
+这些系统表面不同，但底层很相似：
 
-这更接近真实 Coding Agent：局部修改、可预览、可回滚、diff 可审查。
+1. **Agent Runtime**
 
-## 8. 错误恢复机制
+   不是一次 LLM 调用，而是一个长期运行的状态机。
 
-错误来源：
+2. **Tool Sandbox**
 
-- `TOOL_ERROR`
-- shell 非 0 退出码
-- 测试失败
-- import 错误
-- 文件不存在
-- patch check/apply 失败
+   文件、shell、浏览器、GUI、网络都经过工具层，工具层负责权限、安全和审计。
 
-恢复路径：
+3. **Planner + Executor 分离**
 
-```text
-Tool Observation
-  -> Reflector diagnosis
-  -> retry=true
-  -> Executor receives recovery_plan
-  -> read/search/patch/test again
-```
+   Planner 管目标和任务树，Executor 负责下一步动作。
 
-如果同一 TODO 多次失败，Planner 可以把它标成 `BLOCKED`，插入新的诊断任务，或者改变策略。
+4. **Reflection / Verification Loop**
 
-## 9. 新增工具
+   测试、lint、review、浏览器观察会反过来改变计划。
 
-已有工具：
+5. **Long Context + RAG**
 
-- `ReadFileTool`
-- `WriteFileTool`
-- `ListDirectoryTool`
-- `ExecuteBashTool`
-- `SearchCodeTool`
+   大仓库不能全塞 prompt，必须检索、压缩、记忆。
 
-v2 新增：
+6. **Event Trace**
 
-- `GrepTool`：正则搜索文本。
-- `ASTSearchTool`：搜索 Python AST 中的 class/function/import。
-- `GitDiffTool`：查看当前 diff。
-- `RunTestTool`：运行测试或验证命令。
-- `ApplyPatchTool`：预览或应用 unified diff patch。
+   生产 Agent 必须能解释、回放、观测和调试。
 
-工具层仍然负责安全：
+7. **并行子任务**
 
-- 路径不能逃出 workspace。
-- shell 拦截危险命令。
-- patch 文件路径不能逃出 workspace。
+   查文档、跑测试、代码分析、review 可以并行，最后由 Integrator 合并。
 
-## 10. Prompt 模板
+一句话：
 
-### Planner Prompt
+> 生产级 AI Agent = Stateful DAG + Multi-Agent Router + Tool/MCP Sandbox + RAG/Memory + Event Trace + Verification Loop。
 
-```text
-You are the Planner Agent.
-Turn the user's goal into an adaptive TODO list.
-Do not call tools.
-Return strict JSON with todos/current_task_id/done/final_answer.
-```
-
-### Executor Prompt
-
-```text
-You are the Executor Agent.
-Execute exactly the current task using one tool call at a time.
-Return strict JSON with action/action_input/task_complete/result.
-Prefer ApplyPatchTool for edits.
-```
-
-### Reflection Prompt
-
-```text
-You are the Reflection Agent.
-Judge whether the latest result moved the task forward.
-Diagnose errors and decide retry or update_plan.
-Return strict JSON with task_status/success/recovery_plan/retry.
-```
-
-完整文本见 `mini_cc/prompts.py`。
-
-## 11. CLI
-
-安装：
-
-```bash
-python -m pip install -e .
-```
-
-OpenAI：
-
-```powershell
-$env:OPENAI_API_KEY="你的 openai key"
-cc "帮我重构当前项目" --model gpt-4.1-mini
-```
-
-DeepSeek：
-
-```powershell
-$env:DEEPSEEK_API_KEY="你的 deepseek key"
-cc "帮我重构当前项目"
-```
-
-DeepSeek 默认使用：
-
-```text
-base_url = https://api.deepseek.com
-model = deepseek-v4-flash
-```
-
-CLI 会流式显示：
-
-- Planner token
-- Plan 面板
-- Executor token
-- Tool Action 面板
-- Observation 面板
-- Reflection 面板
-- Final Answer
-
-## 12. Claude Code 的关键思想分析
-
-Claude Code 这类现代 Coding Agent 的关键，不是“会调用工具”这么简单。
-
-真正核心是四件事：
-
-1. **显式状态**
-
-   复杂任务不能只靠聊天上下文。Agent 必须维护 TODO、当前任务、工具历史、失败原因和 scratchpad。
-
-2. **规划和执行分离**
-
-   Planner 负责“做什么、按什么顺序做”，Executor 负责“下一步调用什么工具”。这能避免模型一边改代码一边忘记全局目标。
-
-3. **反思控制流**
-
-   Reflection 不是润色回答，而是决定 DAG 走向：retry、replan、done、blocked。
-
-4. **工具层可信**
-
-   模型可以犯错，所以文件路径、危险命令、patch 应用都必须在工具层校验。安全边界不能只写在 prompt 里。
-
-一句话总结：
-
-> 现代 Coding Agent = LLM 决策 + 显式状态机 + 可信工具层 + 反思恢复循环。
-
-Mini Claude Code v2 就是这个设计的最小可运行版本。
+Mini Claude Code v3 就是这个架构的可运行最小模型。

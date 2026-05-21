@@ -1,7 +1,7 @@
 [project]
 name = "mini-claude-code"
-version = "0.2.0"
-description = "Mini Claude Code v2: a planning, execution, reflection coding agent built with LangGraph, OpenAI-compatible APIs, Typer, Rich, and Pydantic."
+version = "0.3.0"
+description = "Mini Claude Code v3: a production-style multi-agent coding system with LangGraph, MCP, RAG, memory, events, and parallel agents."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
