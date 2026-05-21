@@ -1,5 +1,5 @@
 {
-  "last_turn_at": "2026-05-10T12:49:17.144Z",
-  "turn_count": 2,
-  "last_agent_output": "可以，但**不能只换 key**。DeepSeek 官方文档说明它兼容 OpenAI SDK，但需要同时配置：\n\n- `api_key`: DeepSeek 的 key\n- `base_url`: `"
+  "last_turn_at": "2026-05-11T12:36:12.396Z",
+  "turn_count": 8,
+  "last_agent_output": "原因是 schema 校验失败触发了 fallback。\n\n你贴的 Executor 输出里有：\n\n```json\n\"result\": null\n```\n\n但代码里 [mini_cc/state.py"
 }
