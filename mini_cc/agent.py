@@ -16,7 +16,7 @@ except Exception:
     pass
 
 from langgraph.graph import END, StateGraph
-from openai import OpenAI
+from openai import APIConnectionError, APIStatusError, OpenAI, RateLimitError
 from pydantic import BaseModel, ValidationError
 
 from mini_cc.prompts import (
@@ -328,17 +328,21 @@ class MiniClaudeCodeAgent:
 
     def _stream_llm(self, messages: list[dict[str, str]]) -> str:
         chunks: list[str] = []
-        stream = self.client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            stream=True,
-            temperature=0,
-        )
-        for chunk in stream:
-            delta = chunk.choices[0].delta.content or ""
-            if delta:
-                chunks.append(delta)
-                self.event_sink({"type": "token", "content": delta})
+        try:
+            stream = self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                stream=True,
+                temperature=0,
+            )
+            for chunk in stream:
+                delta = chunk.choices[0].delta.content or ""
+                if delta:
+                    chunks.append(delta)
+                    self.event_sink({"type": "token", "content": delta})
+        except (APIStatusError, APIConnectionError, RateLimitError) as exc:
+            self.event_sink({"type": "provider_error", "content": _provider_error_message(exc)})
+            return ""
         return "".join(chunks)
 
     def _finish_with_error(self, state: AgentState, message: str) -> AgentState:
@@ -499,3 +503,21 @@ def _trim(value: str | None, limit: int = 1200) -> str | None:
     if value is None:
         return None
     return value if len(value) <= limit else value[:limit] + "\n...[truncated]"
+
+
+def _provider_error_message(exc: Exception) -> str:
+    if isinstance(exc, APIStatusError):
+        body = getattr(exc, "body", None)
+        provider_message = ""
+        if isinstance(body, dict):
+            error = body.get("error") or {}
+            if isinstance(error, dict):
+                provider_message = str(error.get("message") or "")
+        if exc.status_code == 402 or "insufficient balance" in provider_message.lower():
+            return "API returned 402 Insufficient Balance. Recharge the provider account or switch API key."
+        return f"API status error {exc.status_code}: {provider_message or exc}"
+    if isinstance(exc, RateLimitError):
+        return "API rate limit reached. Retry later or reduce concurrency."
+    if isinstance(exc, APIConnectionError):
+        return "API connection failed. Check network, base_url, or proxy settings."
+    return f"LLM provider error: {exc}"

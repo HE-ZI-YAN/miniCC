@@ -510,3 +510,27 @@ v3 trace 是 JSONL：
 > 生产级 AI Agent = Stateful DAG + Multi-Agent Router + Tool/MCP Sandbox + RAG/Memory + Event Trace + Verification Loop。
 
 Mini Claude Code v3 就是这个架构的可运行最小模型。
+
+## 21. 常见错误
+
+### 402 Insufficient Balance
+
+如果看到：
+
+```text
+APIStatusError: Error code: 402 - Insufficient Balance
+```
+
+原因是当前 `DEEPSEEK_API_KEY` 或 `OPENAI_API_KEY` 对应账户余额不足。这不是工具执行失败，也不是 LangGraph DAG 写错。
+
+处理方式：
+
+1. 去模型供应商控制台充值。
+2. 更换 `.env` 中的 API key。
+3. 检查是否误用了旧 key：
+
+```powershell
+Get-Content .env
+```
+
+v3 runtime 会捕获这类供应商错误，并在可能时使用本地 fallback agent 继续产出结构化结果；但真正的智能规划仍需要可用的模型额度。

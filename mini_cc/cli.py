@@ -4,6 +4,7 @@ import os
 from typing import Any
 
 import typer
+from openai import APIConnectionError, APIStatusError, RateLimitError
 from rich.console import Console
 from rich.panel import Panel
 from rich.syntax import Syntax
@@ -50,7 +51,10 @@ def main(
             max_iterations=max_iterations,
             event_sink=render_event,
         )
-        agent.run(task)
+        try:
+            agent.run(task)
+        except (APIStatusError, APIConnectionError, RateLimitError) as exc:
+            render_provider_error(exc)
         return
 
     if runtime.lower() != "v3":
@@ -67,7 +71,10 @@ def main(
         parallelism=parallelism,
         event_sink=render_event,
     )
-    agent.run(task)
+    try:
+        agent.run(task)
+    except (APIStatusError, APIConnectionError, RateLimitError) as exc:
+        render_provider_error(exc)
 
 
 def render_event(event: dict[str, Any]) -> None:
@@ -113,6 +120,9 @@ def render_event(event: dict[str, Any]) -> None:
     elif event_type == "final":
         console.print()
         console.print(Panel(event["content"], title="Final Answer", border_style="cyan"))
+    elif event_type == "provider_error":
+        console.print()
+        console.print(Panel(event["content"], title="LLM Provider Error", border_style="red"))
     elif event_type == "v3_event":
         event_payload = event["event"]
         name = event_payload["type"]
@@ -120,6 +130,9 @@ def render_event(event: dict[str, Any]) -> None:
         payload = event_payload.get("payload", {})
         if name == "stream.token":
             console.print(payload.get("token", ""), end="", soft_wrap=True)
+        elif name == "llm.error":
+            console.print()
+            console.print(Panel(payload.get("message", "LLM provider error"), title="LLM Error", border_style="red"))
         elif name in {"agent.started", "agent.routed", "agent.finished", "tool.started", "tool.finished", "tool.failed"}:
             console.print()
             console.print(Panel(str(payload), title=f"{name} :: {source}", border_style="cyan"))
@@ -163,3 +176,34 @@ def load_env_file(directory: str) -> None:
             value = value.strip().strip('"').strip("'")
             if key and key not in os.environ:
                 os.environ[key] = value
+
+
+def render_provider_error(exc: Exception) -> None:
+    message = provider_error_message(exc)
+    console.print()
+    console.print(Panel(message, title="LLM Provider Error", border_style="red"))
+
+
+def provider_error_message(exc: Exception) -> str:
+    if isinstance(exc, APIStatusError):
+        body = getattr(exc, "body", None)
+        provider_message = ""
+        if isinstance(body, dict):
+            error = body.get("error") or {}
+            if isinstance(error, dict):
+                provider_message = str(error.get("message") or "")
+        if exc.status_code == 402 or "insufficient balance" in provider_message.lower():
+            return (
+                "API 返回 402：Insufficient Balance。\n\n"
+                "原因：当前 API key 对应的账户余额不足，不是 Mini Claude Code 的工具执行错误。\n\n"
+                "处理方式：\n"
+                "1. 去 DeepSeek/OpenAI 控制台充值或更换有余额的 key。\n"
+                "2. 检查 .env 中是否配置了正确的 DEEPSEEK_API_KEY 或 OPENAI_API_KEY。\n"
+                "3. 如果你想临时避免调用模型，可以用 v3 的本地 fallback 结果作为参考，但真正智能路由仍需要可用余额。"
+            )
+        return f"API 状态错误 {exc.status_code}: {provider_message or exc}"
+    if isinstance(exc, RateLimitError):
+        return "API 触发限流，请稍后重试或降低并发/切换模型。"
+    if isinstance(exc, APIConnectionError):
+        return "API 网络连接失败，请检查网络、base_url 和代理配置。"
+    return f"模型供应商调用失败：{exc}"

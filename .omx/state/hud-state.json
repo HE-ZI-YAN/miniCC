@@ -1,5 +1,5 @@
 {
-  "last_turn_at": "2026-05-11T12:36:12.396Z",
-  "turn_count": 8,
-  "last_agent_output": "原因是 schema 校验失败触发了 fallback。\n\n你贴的 Executor 输出里有：\n\n```json\n\"result\": null\n```\n\n但代码里 [mini_cc/state.py"
+  "last_turn_at": "2026-05-21T03:22:24.350Z",
+  "turn_count": 10,
+  "last_agent_output": "定位到了：这不是 LangGraph 或工具调用的问题，而是模型供应商返回的 **402 Insufficient Balance**，也就是当前 `DEEPSEEK_API_KEY` / `OPEN"
 }

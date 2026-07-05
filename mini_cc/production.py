@@ -15,7 +15,7 @@ except Exception:
     pass
 
 from langgraph.graph import END, StateGraph
-from openai import OpenAI
+from openai import APIConnectionError, APIStatusError, OpenAI, RateLimitError
 from pydantic import BaseModel, ValidationError
 
 from mini_cc.browser_agent import BrowserAgent
@@ -189,7 +189,7 @@ class ProductionAgentRuntime:
     def _route(self, shared: SharedState) -> RouterDecision:
         context = self._runtime_context(shared)
         prompt = ROUTER_PROMPT.format(context=context)
-        parsed = self._json_llm(prompt, RouterDecision)
+        parsed = self._json_llm(prompt, RouterDecision, shared.run_id)
         if parsed:
             return parsed
         if shared.results and any(result.role == "reviewer" and result.success for result in shared.results[-3:]):
@@ -246,23 +246,27 @@ class ProductionAgentRuntime:
             task=assignment.task,
             context=self._runtime_context(shared),
         )
-        parsed = self._json_llm(prompt, AgentResult)
+        parsed = self._json_llm(prompt, AgentResult, shared.run_id)
         return parsed or AgentResult(role=assignment.role, summary="Agent returned invalid JSON.", success=False)
 
-    def _json_llm(self, prompt: str, model: type[T]) -> T | None:
+    def _json_llm(self, prompt: str, model: type[T], run_id: str) -> T | None:
         self.costs.add_prompt(prompt)
-        stream = self.client.chat.completions.create(
-            model=self.model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0,
-            stream=True,
-        )
         chunks: list[str] = []
-        for chunk in stream:
-            delta = chunk.choices[0].delta.content or ""
-            if delta:
-                chunks.append(delta)
-                self.events.emit("stream.token", "llm", "stream", token=delta)
+        try:
+            stream = self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0,
+                stream=True,
+            )
+            for chunk in stream:
+                delta = chunk.choices[0].delta.content or ""
+                if delta:
+                    chunks.append(delta)
+                    self.events.emit("stream.token", "llm", run_id, token=delta)
+        except (APIStatusError, APIConnectionError, RateLimitError) as exc:
+            self.events.emit("llm.error", "llm", run_id, message=_provider_error_message(exc))
+            return None
         content = "".join(chunks)
         self.costs.add_completion(content)
         raw = _extract_json(content)
@@ -355,3 +359,21 @@ def _looks_complete(shared: SharedState) -> bool:
     recent = shared.results[-3:]
     roles = {result.role for result in recent if result.success}
     return {"coding", "test", "reviewer"}.issubset(roles)
+
+
+def _provider_error_message(exc: Exception) -> str:
+    if isinstance(exc, APIStatusError):
+        body = getattr(exc, "body", None)
+        message = ""
+        if isinstance(body, dict):
+            error = body.get("error") or {}
+            if isinstance(error, dict):
+                message = str(error.get("message") or "")
+        if exc.status_code == 402 or "insufficient balance" in message.lower():
+            return (
+                "LLM provider returned 402 Insufficient Balance. "
+                "Please recharge the provider account or switch API key/model. "
+                "The v3 runtime will continue with local fallback agents where possible."
+            )
+        return f"LLM provider status error {exc.status_code}: {message or exc}"
+    return f"LLM provider error: {exc}"

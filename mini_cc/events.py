@@ -25,6 +25,7 @@ EventType = Literal[
     "rag.indexed",
     "rag.retrieved",
     "mcp.tool_discovered",
+    "llm.error",
 ]
 
 
